@@ -99,7 +99,7 @@ function App() {
   useEffect(() => {
     const interval = setInterval(() => {
       setSloganIndex((prev) => (prev + 1) % SLOGANS.length);
-    }, 4000); 
+    }, 6000); 
     return () => clearInterval(interval);
   }, []);
 
@@ -287,7 +287,7 @@ function App() {
              <div className="w-full pl-6 pr-2">
                <p key={sloganIndex} className="text-sm font-medium text-gray-600 animate-fade-in-up">{SLOGANS[sloganIndex]}</p>
              </div>
-             <div className="absolute right-2 bottom-2 text-[10px] text-gray-300">每 4 秒切換</div>
+             <div className="absolute right-2 bottom-2 text-[10px] text-gray-300">每 6 秒切換</div>
           </div>
         </div>
 
