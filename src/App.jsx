@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { db } from './firebase';
-import { collection, addDoc, onSnapshot, query, orderBy, serverTimestamp } from 'firebase/firestore';
-import { Trophy, History, PlusCircle, AlertCircle, Coins, X, Megaphone, UserPlus, Calculator, TrendingUp, Medal, Percent } from 'lucide-react';
+import { collection, addDoc, deleteDoc, doc, onSnapshot, query, orderBy, serverTimestamp } from 'firebase/firestore';
+import { Trophy, History, PlusCircle, AlertCircle, Coins, X, Megaphone, UserPlus, Calculator, TrendingUp, Medal, Receipt, Trash2 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 
-// 預設固定班底 (可自行修改)
+// 預設固定班底
 const INITIAL_PRESETS = [
   "JK", "Mochi", "Ryan", "阿傑", 
   "道道", "嚕卡", "柏鈞", "JS"
@@ -12,7 +12,6 @@ const INITIAL_PRESETS = [
 
 const EAST_MONEY_PER_ROUND = 100;
 
-// 跑馬燈標語
 const SLOGANS = [
   "小賭怡情，大賭郭台銘 💸",
   "小孩沒有天天哭，麻將沒有天天輸 🀄",
@@ -22,46 +21,34 @@ const SLOGANS = [
   "沈迷賭博，富可敵國 🔥"
 ];
 
-// --- 輔助功能：結算算法 (修正版：包含公費) ---
+// --- 輔助功能：結算算法 ---
 const calculateSettlement = (records) => {
-  // 1. 分類贏家與輸家
-  // 輸家從小排到大 (例如 -500, -200, -100)，讓輸最多的人先去填補贏家
   let debtors = records.filter(r => r.amount < 0).sort((a, b) => a.amount - b.amount);
-  // 贏家從大排到小
   let creditors = records.filter(r => r.amount > 0).sort((a, b) => b.amount - a.amount);
   
   const transactions = [];
   let dIndex = 0;
   let cIndex = 0;
 
-  // 深拷貝以免影響原始資料顯示
   debtors = debtors.map(d => ({...d}));
   creditors = creditors.map(c => ({...c}));
 
-  // 2. 進行媒合 (P2P轉帳)
   while (dIndex < debtors.length && cIndex < creditors.length) {
     let debtor = debtors[dIndex];
     let creditor = creditors[cIndex];
-    
-    // 取「債務人欠款」與「債權人應收」的最小值
     let amount = Math.min(Math.abs(debtor.amount), creditor.amount);
     
     if (amount > 0) {
       transactions.push(`${debtor.name} ➜ ${creditor.name} $${amount}`);
     }
 
-    // 更新餘額
-    debtor.amount += amount; // 負數加正數 = 接近0
+    debtor.amount += amount;
     creditor.amount -= amount;
 
-    // 如果債務人還清了(變成0)，換下一個債務人
-    // 注意：浮點數計算可能有誤差，所以用 < 1 判斷
     if (Math.abs(debtor.amount) < 1) dIndex++;
-    // 如果債權人收滿了(變成0)，換下一個債權人
     if (creditor.amount < 1) cIndex++;
   }
 
-  // 3. 檢查剩餘債務 (這些就是東錢/公費)
   debtors.forEach(d => {
     if (Math.abs(d.amount) >= 1) {
        transactions.push(`${d.name} ➜ 💰公費 $${Math.abs(d.amount)}`);
@@ -72,35 +59,43 @@ const calculateSettlement = (records) => {
 };
 
 function App() {
-  // --- 狀態管理 ---
+  // --- 資料狀態 ---
   const [logs, setLogs] = useState([]);
+  const [expenseLogs, setExpenseLogs] = useState([]); // 新增：公費收支紀錄
   const [stats, setStats] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [eastMoneyTotal, setEastMoneyTotal] = useState(0);
   
+  // 金額計算狀態
+  const [gameIncomeTotal, setGameIncomeTotal] = useState(0); // 打牌累積的
+  const [expenseTotal, setExpenseTotal] = useState(0); // 手動花掉的
+  const [finalEastMoney, setFinalEastMoney] = useState(0); // 最後顯示的總額
+
   // UI 狀態
   const [sloganIndex, setSloganIndex] = useState(0);
   const [availablePlayers, setAvailablePlayers] = useState(INITIAL_PRESETS);
   const [showAddPlayer, setShowAddPlayer] = useState(false);
   const [newPlayerName, setNewPlayerName] = useState("");
   
-  // Modal 狀態
-  const [selectedPlayer, setSelectedPlayer] = useState(null); // 用於顯示圖表
-  const [settlementData, setSettlementData] = useState(null); // 用於顯示結算
+  // Modals
+  const [selectedPlayer, setSelectedPlayer] = useState(null);
+  const [settlementData, setSettlementData] = useState(null);
+  const [showExpenseModal, setShowExpenseModal] = useState(false); // 新增：公費管理視窗
 
   // 表單狀態
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   const [rounds, setRounds] = useState(1);
   const [players, setPlayers] = useState([
-    { name: '', amount: '' },
-    { name: '', amount: '' },
-    { name: '', amount: '' },
-    { name: '', amount: '' }
+    { name: '', amount: '' }, { name: '', amount: '' }, 
+    { name: '', amount: '' }, { name: '', amount: '' }
   ]);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
 
-  // --- 1. 跑馬燈特效 ---
+  // 公費表單狀態
+  const [expenseNote, setExpenseNote] = useState("");
+  const [expenseAmount, setExpenseAmount] = useState("");
+
+  // --- 1. 跑馬燈 ---
   useEffect(() => {
     const interval = setInterval(() => {
       setSloganIndex((prev) => (prev + 1) % SLOGANS.length);
@@ -108,58 +103,67 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // --- 2. 從 Firebase 讀取資料 ---
+  // --- 2. 監聽 Firebase: 戰績 (Matches) ---
   useEffect(() => {
     const q = query(collection(db, "matches"), orderBy("date", "desc")); 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setLogs(data);
-      calculateStats(data); // 觸發計算
+      calculateStats(data);
       setLoading(false);
     });
     return () => unsubscribe();
   }, []);
 
-  // --- 3. 計算排行榜、徽章與出席率 ---
+  // --- 3. 新增監聽 Firebase: 公費收支 (Expenses) ---
+  useEffect(() => {
+    const q = query(collection(db, "expenses"), orderBy("createdAt", "desc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setExpenseLogs(data);
+      
+      // 計算手動收支總和
+      const total = data.reduce((sum, item) => sum + (parseInt(item.amount) || 0), 0);
+      setExpenseTotal(total);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // --- 4. 合併計算總公費 ---
+  useEffect(() => {
+    setFinalEastMoney(gameIncomeTotal + expenseTotal);
+  }, [gameIncomeTotal, expenseTotal]);
+
+  // --- 計算邏輯 ---
   const calculateStats = (matchData) => {
     const summary = {};
-    let totalFund = 0;
-    
-    // 計算總體將數 (作為出席率的分母)
+    let totalGameFund = 0;
     const grandTotalRounds = matchData.reduce((sum, m) => sum + (parseInt(m.rounds) || 1), 0);
 
     matchData.forEach(match => {
       const matchRounds = parseInt(match.rounds) || 1;
-      totalFund += matchRounds * EAST_MONEY_PER_ROUND;
+      totalGameFund += matchRounds * EAST_MONEY_PER_ROUND;
 
       match.records.forEach(record => {
         const pName = record.name.trim();
         const amt = parseInt(record.amount) || 0;
         
         if (!summary[pName]) summary[pName] = { 
-          net: 0, 
-          rounds: 0, 
-          maxWin: 0, 
-          maxLoss: 0,
-          history: [] // 用於畫圖
+          net: 0, rounds: 0, maxWin: 0, maxLoss: 0, history: [] 
         };
         
         summary[pName].net += amt;
         summary[pName].rounds += matchRounds;
         if (amt > summary[pName].maxWin) summary[pName].maxWin = amt;
         if (amt < summary[pName].maxLoss) summary[pName].maxLoss = amt;
-        
-        // 紀錄每一場的累積金額 (為了畫圖)
         summary[pName].history.unshift({ date: match.date, amount: summary[pName].net });
       });
     });
 
-    setEastMoneyTotal(totalFund);
+    setGameIncomeTotal(totalGameFund);
 
-    // 轉成陣列並排序
     const sortedStats = Object.entries(summary)
       .map(([name, stat]) => {
-        // --- 徽章邏輯 ---
         const badges = [];
         if (stat.net > 2000) badges.push({icon: '🏦', label: '大富豪'});
         if (stat.maxWin >= 1000) badges.push({icon: '🚀', label: '一波流'});
@@ -167,7 +171,6 @@ function App() {
         if (stat.rounds > 20 && Math.abs(stat.net) < 200) badges.push({icon: '🐢', label: '打工仔'});
         if (stat.net < -2000) badges.push({icon: '💸', label: '慈善家'});
 
-        // --- 出席率邏輯 ---
         const attendanceRate = grandTotalRounds > 0 
           ? Math.round((stat.rounds / grandTotalRounds) * 100) 
           : 0;
@@ -179,7 +182,7 @@ function App() {
     setStats(sortedStats);
   };
 
-  // --- 4. 功能函式 ---
+  // --- 表單處理 ---
   const handlePlayerChange = (index, field, value) => {
     const newPlayers = [...players];
     newPlayers[index][field] = value;
@@ -189,9 +192,7 @@ function App() {
   const quickAddPlayer = (name) => {
     if (players.some(p => p.name === name)) return;
     const emptyIndex = players.findIndex(p => p.name === '');
-    if (emptyIndex !== -1) {
-      handlePlayerChange(emptyIndex, 'name', name);
-    }
+    if (emptyIndex !== -1) handlePlayerChange(emptyIndex, 'name', name);
   };
 
   const handleAddNewPlayer = () => {
@@ -202,14 +203,13 @@ function App() {
     }
   };
 
+  // 送出戰績
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
     
-    if (players.some(p => !p.name.trim())) {
-      setError("❌ 請輸入所有玩家姓名");
-      return;
-    }
+    if (players.some(p => !p.name.trim())) { setError("❌ 請輸入所有玩家姓名"); return; }
+    
     const total = players.reduce((sum, p) => sum + (parseInt(p.amount) || 0), 0);
     const expectedTotal = -(rounds * EAST_MONEY_PER_ROUND);
 
@@ -223,10 +223,7 @@ function App() {
         date: date,
         rounds: parseInt(rounds),
         createdAt: serverTimestamp(),
-        records: players.map(p => ({
-          name: p.name.trim(),
-          amount: parseInt(p.amount)
-        }))
+        records: players.map(p => ({ name: p.name.trim(), amount: parseInt(p.amount) }))
       });
       setPlayers(players.map(p => ({ ...p, amount: '' })));
       setSuccessMsg("✅ 戰績登錄成功！");
@@ -237,7 +234,33 @@ function App() {
     }
   };
 
-  // --- UI Render ---
+  // --- 公費管理功能 ---
+  const handleAddExpense = async (e) => {
+    e.preventDefault();
+    if (!expenseNote || !expenseAmount) return;
+
+    try {
+      await addDoc(collection(db, "expenses"), {
+        note: expenseNote,
+        amount: parseInt(expenseAmount),
+        date: new Date().toISOString().split('T')[0],
+        createdAt: serverTimestamp()
+      });
+      setExpenseNote("");
+      setExpenseAmount("");
+    } catch (err) {
+      console.error(err);
+      alert("新增失敗");
+    }
+  };
+
+  const handleDeleteExpense = async (id) => {
+    if (window.confirm("確定要刪除這筆紀錄嗎？")) {
+      await deleteDoc(doc(db, "expenses", id));
+    }
+  };
+
+  // --- Render ---
   return (
     <div className="min-h-screen bg-gray-100 p-4 font-sans text-gray-800 pb-20">
       <div className="max-w-md mx-auto space-y-4">
@@ -246,13 +269,19 @@ function App() {
           <span className="text-4xl">🀄</span> 麻將積分榜
         </h1>
 
-        {/* --- 公費 + 佈告欄 --- */}
+        {/* --- 公費卡片 (可點擊) --- */}
         <div className="flex gap-2 h-24">
-          <div className="w-1/3 bg-amber-500 rounded-xl p-2 text-white shadow flex flex-col justify-center items-center text-center">
-            <Coins size={24} className="mb-1 opacity-80" />
-            <span className="text-xs opacity-90">累積東錢</span>
-            <span className="text-xl font-bold">${eastMoneyTotal}</span>
-          </div>
+          <button 
+            onClick={() => setShowExpenseModal(true)}
+            className="w-1/3 bg-gradient-to-br from-amber-400 to-amber-600 rounded-xl p-2 text-white shadow hover:scale-105 transition active:scale-95 flex flex-col justify-center items-center text-center relative overflow-hidden"
+          >
+            <div className="absolute top-1 right-1 opacity-50"><Receipt size={16}/></div>
+            <Coins size={24} className="mb-1 opacity-90" />
+            <span className="text-xs opacity-90">目前公費</span>
+            <span className="text-xl font-bold">${finalEastMoney}</span>
+          </button>
+
+          {/* 跑馬燈 */}
           <div className="w-2/3 bg-white rounded-xl p-3 shadow flex items-center relative overflow-hidden">
              <div className="absolute left-2 top-2 text-emerald-500"><Megaphone size={16} /></div>
              <div className="w-full pl-6 pr-2">
@@ -262,7 +291,7 @@ function App() {
           </div>
         </div>
 
-        {/* --- 登錄戰績區 --- */}
+        {/* --- 登錄戰績 --- */}
         <div className="bg-white p-5 rounded-xl shadow-md border-t-4 border-emerald-500">
           <h2 className="text-lg font-bold mb-3 flex items-center gap-2">
             <PlusCircle size={20} /> 登錄戰績
@@ -316,7 +345,7 @@ function App() {
           </form>
         </div>
 
-        {/* --- 排行榜 (新增出席率欄位) --- */}
+        {/* --- 排行榜 --- */}
         <div className="bg-white p-4 rounded-xl shadow-md">
           <h2 className="text-lg font-bold mb-2 flex items-center gap-2"><Trophy size={18} className="text-yellow-500"/> 排行榜 (點擊看走勢)</h2>
           <div className="overflow-x-auto">
@@ -333,18 +362,14 @@ function App() {
                 {stats.map((s, idx) => (
                   <tr key={s.name} onClick={() => setSelectedPlayer(s)} className="border-b last:border-0 hover:bg-emerald-50 cursor-pointer transition">
                     <td className="py-2 pl-2 font-medium flex flex-col justify-center">
-                      <div className="flex items-center gap-1">
-                        {idx===0 ? '👑' : ''} {s.name}
-                      </div>
+                      <div className="flex items-center gap-1">{idx===0 ? '👑' : ''} {s.name}</div>
                       <div className="flex gap-1 mt-0.5">
                         {s.badges.map((b, i) => <span key={i} title={b.label} className="text-[10px] bg-gray-100 rounded px-1">{b.icon}</span>)}
                       </div>
                     </td>
                     <td className="text-center text-gray-400">{s.rounds}</td>
                     <td className="text-center text-gray-500 text-xs">
-                       <span className={`px-1.5 py-0.5 rounded ${s.attendanceRate > 50 ? 'bg-orange-100 text-orange-700 font-bold' : 'bg-gray-100'}`}>
-                         {s.attendanceRate}%
-                       </span>
+                       <span className={`px-1.5 py-0.5 rounded ${s.attendanceRate > 50 ? 'bg-orange-100 text-orange-700 font-bold' : 'bg-gray-100'}`}>{s.attendanceRate}%</span>
                     </td>
                     <td className={`text-right font-bold pr-2 ${s.net >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>{s.net > 0 ? '+' : ''}{s.net}</td>
                   </tr>
@@ -354,11 +379,9 @@ function App() {
           </div>
         </div>
 
-        {/* --- 近期戰況 (含結算功能) --- */}
+        {/* --- 近期戰況 --- */}
         <div className="bg-white p-4 rounded-xl shadow-md">
-           <h2 className="text-lg font-bold mb-4 flex items-center gap-2">
-            <History size={18} className="text-blue-500" /> 近期戰況
-          </h2>
+           <h2 className="text-lg font-bold mb-4 flex items-center gap-2"><History size={18} className="text-blue-500" /> 近期戰況</h2>
           <div className="space-y-4">
             {logs.slice(0, 10).map((log) => (
               <div key={log.id} className="border-b last:border-0 pb-3">
@@ -366,10 +389,7 @@ function App() {
                   <span className="text-xs text-gray-400">{log.date}</span>
                   <div className="flex gap-2">
                     <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">{log.rounds || 1} 將</span>
-                    <button 
-                      onClick={() => setSettlementData(calculateSettlement(log.records))}
-                      className="text-xs flex items-center gap-1 bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full hover:bg-blue-100 font-bold"
-                    >
+                    <button onClick={() => setSettlementData(calculateSettlement(log.records))} className="text-xs flex items-center gap-1 bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full hover:bg-blue-100 font-bold">
                       <Calculator size={10} /> 結算
                     </button>
                   </div>
@@ -386,17 +406,81 @@ function App() {
             {logs.length === 0 && <p className="text-center text-gray-400 text-sm">暫無紀錄</p>}
           </div>
         </div>
-
       </div>
 
-      {/* --- Modal: 個人走勢圖 --- */}
+      {/* --- Modal: 公費管理 (新增) --- */}
+      {showExpenseModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowExpenseModal(false)}>
+          <div className="bg-white rounded-xl p-6 w-full max-w-sm" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="font-bold text-lg flex items-center gap-2">
+                <Receipt size={20} className="text-amber-500"/> 公費收支管理
+              </h3>
+              <button onClick={() => setShowExpenseModal(false)} className="p-1 hover:bg-gray-100 rounded-full"><X size={20}/></button>
+            </div>
+            
+            {/* 統計摘要 */}
+            <div className="bg-amber-50 p-3 rounded-lg mb-4 text-center">
+              <p className="text-sm text-amber-800">打牌累積收入: <span className="font-bold">${gameIncomeTotal}</span></p>
+              <p className="text-sm text-red-600">額外支出/收入: <span className="font-bold">{expenseTotal >=0 ? '+' : ''}{expenseTotal}</span></p>
+              <div className="mt-2 border-t border-amber-200 pt-2">
+                <p className="text-xs text-gray-500">目前剩餘</p>
+                <p className="text-2xl font-bold text-emerald-700">${finalEastMoney}</p>
+              </div>
+            </div>
+
+            {/* 新增表單 */}
+            <form onSubmit={handleAddExpense} className="flex gap-2 mb-4">
+              <div className="flex-1 space-y-2">
+                 <input 
+                   placeholder="項目 (例: 聚餐)" 
+                   value={expenseNote} 
+                   onChange={e => setExpenseNote(e.target.value)}
+                   className="w-full text-sm p-2 border rounded"
+                   required
+                 />
+                 <input 
+                   type="number" 
+                   placeholder="金額 (支出請打負號)" 
+                   value={expenseAmount} 
+                   onChange={e => setExpenseAmount(e.target.value)}
+                   className="w-full text-sm p-2 border rounded"
+                   required
+                 />
+              </div>
+              <button type="submit" className="bg-amber-500 text-white rounded-lg px-4 font-bold hover:bg-amber-600 self-end h-[74px]">
+                新增
+              </button>
+            </form>
+
+            {/* 收支紀錄列表 */}
+            <div className="max-h-60 overflow-y-auto space-y-2 border-t pt-2">
+               {expenseLogs.map(log => (
+                 <div key={log.id} className="flex justify-between items-center bg-gray-50 p-2 rounded border border-gray-100 text-sm">
+                   <div>
+                     <p className="font-bold text-gray-700">{log.note}</p>
+                     <p className="text-xs text-gray-400">{log.date}</p>
+                   </div>
+                   <div className="flex items-center gap-2">
+                     <span className={`font-bold ${log.amount >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                       {log.amount > 0 ? '+' : ''}{log.amount}
+                     </span>
+                     <button onClick={() => handleDeleteExpense(log.id)} className="text-gray-300 hover:text-red-500"><Trash2 size={14}/></button>
+                   </div>
+                 </div>
+               ))}
+               {expenseLogs.length === 0 && <p className="text-center text-gray-400 text-xs py-2">尚無額外收支紀錄</p>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- Modal: 個人走勢圖 (保持不變) --- */}
       {selectedPlayer && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setSelectedPlayer(null)}>
           <div className="bg-white rounded-xl p-4 w-full max-w-lg" onClick={e => e.stopPropagation()}>
             <div className="flex justify-between items-center mb-4">
-              <h3 className="font-bold text-lg flex items-center gap-2">
-                <TrendingUp size={20} className="text-emerald-600"/> {selectedPlayer.name} 的資金曲線
-              </h3>
+              <h3 className="font-bold text-lg flex items-center gap-2"><TrendingUp size={20} className="text-emerald-600"/> {selectedPlayer.name} 的資金曲線</h3>
               <button onClick={() => setSelectedPlayer(null)} className="p-1 hover:bg-gray-100 rounded-full"><X size={20}/></button>
             </div>
             <div className="h-64 w-full">
@@ -412,42 +496,31 @@ function App() {
               </ResponsiveContainer>
             </div>
             <div className="mt-4 flex gap-2 flex-wrap justify-center">
-              {selectedPlayer.badges.map((b,i) => (
-                <span key={i} className="px-2 py-1 bg-yellow-50 text-yellow-700 text-xs rounded border border-yellow-200 font-bold flex items-center gap-1">
-                  {b.icon} {b.label}
-                </span>
-              ))}
+              {selectedPlayer.badges.map((b,i) => <span key={i} className="px-2 py-1 bg-yellow-50 text-yellow-700 text-xs rounded border border-yellow-200 font-bold flex items-center gap-1">{b.icon} {b.label}</span>)}
             </div>
           </div>
         </div>
       )}
 
-      {/* --- Modal: 結算小幫手 --- */}
+      {/* --- Modal: 結算小幫手 (保持不變) --- */}
       {settlementData && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setSettlementData(null)}>
           <div className="bg-white rounded-xl p-6 w-full max-w-sm text-center" onClick={e => e.stopPropagation()}>
             <div className="flex justify-between items-center mb-4">
-              <h3 className="font-bold text-lg flex items-center gap-2 mx-auto pl-6">
-                <Calculator size={20} className="text-blue-500"/> 建議轉帳路徑
-              </h3>
+              <h3 className="font-bold text-lg flex items-center gap-2 mx-auto pl-6"><Calculator size={20} className="text-blue-500"/> 建議轉帳路徑</h3>
               <button onClick={() => setSettlementData(null)} className="p-1 hover:bg-gray-100 rounded-full"><X size={20}/></button>
             </div>
             <div className="space-y-3">
               {settlementData.length > 0 ? (
                 settlementData.map((trans, i) => (
-                  <div key={i} className={`p-3 rounded-lg font-bold border text-lg ${trans.includes('公費') ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-gray-50 text-gray-700 border-gray-200'}`}>
-                    {trans}
-                  </div>
+                  <div key={i} className={`p-3 rounded-lg font-bold border text-lg ${trans.includes('公費') ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-gray-50 text-gray-700 border-gray-200'}`}>{trans}</div>
                 ))
-              ) : (
-                <p className="text-gray-500">帳目已平，無需轉帳 🎉</p>
-              )}
+              ) : <p className="text-gray-500">帳目已平，無需轉帳 🎉</p>}
             </div>
             <p className="text-xs text-gray-400 mt-4">已自動計算公費與最小轉帳路徑</p>
           </div>
         </div>
       )}
-
     </div>
   );
 }
