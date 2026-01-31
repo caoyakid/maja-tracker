@@ -83,7 +83,7 @@ function App() {
 
   // 表單狀態
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
-  const [rounds, setRounds] = useState(1);
+  const [rounds, setRounds] = useState(2);
   const [players, setPlayers] = useState([
     { name: '', amount: '' }, { name: '', amount: '' }, 
     { name: '', amount: '' }, { name: '', amount: '' }
@@ -140,7 +140,11 @@ function App() {
     let totalGameFund = 0;
     const grandTotalRounds = matchData.reduce((sum, m) => sum + (parseInt(m.rounds) || 1), 0);
 
-    matchData.forEach(match => {
+    // 1. 先建立一個時間正序的陣列 (最舊 -> 最新)
+    const chronologicalMatches = [...matchData].reverse();
+
+    // 2. 改用 chronologicalMatches 跑迴圈
+    chronologicalMatches.forEach(match => {
       const matchRounds = parseInt(match.rounds) || 1;
       totalGameFund += matchRounds * EAST_MONEY_PER_ROUND;
 
@@ -152,11 +156,14 @@ function App() {
           net: 0, rounds: 0, maxWin: 0, maxLoss: 0, history: [] 
         };
         
+        // 累加數值
         summary[pName].net += amt;
         summary[pName].rounds += matchRounds;
         if (amt > summary[pName].maxWin) summary[pName].maxWin = amt;
         if (amt < summary[pName].maxLoss) summary[pName].maxLoss = amt;
-        summary[pName].history.unshift({ date: match.date, amount: summary[pName].net });
+        
+        // 3. 改用 push (因為現在時間是正序，直接往後加就是累積圖)
+        summary[pName].history.push({ date: match.date, amount: summary[pName].net });
       });
     });
 
@@ -485,7 +492,7 @@ function App() {
             </div>
             <div className="h-64 w-full">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={[...selectedPlayer.history].reverse()}>
+                <LineChart data={[...selectedPlayer.history]}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} />
                   <XAxis dataKey="date" tick={{fontSize: 10}} tickFormatter={(val) => val.slice(5)} />
                   <YAxis tick={{fontSize: 10}} width={30} />
