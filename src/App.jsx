@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { db } from './firebase';
-import { collection, addDoc, deleteDoc, doc, onSnapshot, query, orderBy, serverTimestamp } from 'firebase/firestore';
+import { collection, addDoc, deleteDoc, doc, onSnapshot, query, orderBy, serverTimestamp, writeBatch } from 'firebase/firestore';
 import { Trophy, History, PlusCircle, AlertCircle, Coins, X, Megaphone, UserPlus, Calculator, TrendingUp, Medal, Receipt, Trash2 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 
@@ -8,7 +8,7 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 const INITIAL_PRESETS = [
   "JK", "Mochi", "Ryan", "阿傑", "Alan",
   "道道", "嚕卡", "柏鈞", "JS", "萌萌噠"
-];
+].map(name => ({ id: name.toLowerCase(), name })); // 改為物件陣列以供備用
 
 const EAST_MONEY_PER_ROUND = 100;
 
@@ -73,7 +73,7 @@ function App() {
   // UI 狀態
   const [sloganIndex, setSloganIndex] = useState(0);
   const [availablePlayers, setAvailablePlayers] = useState(INITIAL_PRESETS);
-  const [showAddPlayer, setShowAddPlayer] = useState(false);
+  const [showAddPlayer, setShowAddPlayer] = useState(false); // { id: 'xxx', name: 'yyy' }
   const [newPlayerName, setNewPlayerName] = useState("");
   
   // Modals
@@ -85,8 +85,8 @@ function App() {
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   const [rounds, setRounds] = useState(2);
   const [players, setPlayers] = useState([
-    { name: '', amount: '' }, { name: '', amount: '' }, 
-    { name: '', amount: '' }, { name: '', amount: '' }
+    { id: null, name: '', amount: '' }, { id: null, name: '', amount: '' }, 
+    { id: null, name: '', amount: '' }, { id: null, name: '', amount: '' }
   ]);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
@@ -136,8 +136,8 @@ function App() {
       if (snapshot.empty) {
         setAvailablePlayers(INITIAL_PRESETS); // 如果資料庫是空的，就用預設值
       } else {
-        const presetData = snapshot.docs.map(doc => doc.data().name);
-        setAvailablePlayers(presetData);
+        const presetsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setAvailablePlayers(presetsData);
       }
     });
     return () => unsubscribe();
@@ -163,21 +163,23 @@ function App() {
       totalGameFund += matchRounds * EAST_MONEY_PER_ROUND;
 
       match.records.forEach(record => {
-        const pName = record.name.trim();
+        const pId = record.playerId || record.name.trim(); // 兼容舊資料 (用名字當 id)
+        const pName = record.name.trim(); // 名字還是要用最新的
         const amt = parseInt(record.amount) || 0;
         
-        if (!summary[pName]) summary[pName] = { 
-          net: 0, rounds: 0, maxWin: 0, maxLoss: 0, history: [] 
+        if (!summary[pId]) summary[pId] = { 
+          name: pName, net: 0, rounds: 0, maxWin: 0, maxLoss: 0, history: [] 
         };
         
         // 累加數值
-        summary[pName].net += amt;
-        summary[pName].rounds += matchRounds;
-        if (amt > summary[pName].maxWin) summary[pName].maxWin = amt;
-        if (amt < summary[pName].maxLoss) summary[pName].maxLoss = amt;
+        summary[pId].name = pName; // 隨時更新為最新的名字
+        summary[pId].net += amt;
+        summary[pId].rounds += matchRounds;
+        if (amt > summary[pId].maxWin) summary[pId].maxWin = amt;
+        if (amt < summary[pId].maxLoss) summary[pId].maxLoss = amt;
         
         // 3. 改用 push (因為現在時間是正序，直接往後加就是累積圖)
-        summary[pName].history.push({ date: match.date, amount: summary[pName].net });
+        summary[pId].history.push({ date: match.date, amount: summary[pId].net });
       });
     });
 
@@ -185,7 +187,7 @@ function App() {
 
     const sortedStats = Object.entries(summary)
       .map(([name, stat]) => {
-        const badges = [];
+        const badges = []; // 這裡的 name 其實是 playerId
         if (stat.net > 2000) badges.push({icon: '🏦', label: '大富豪'});
         if (stat.maxWin >= 1000) badges.push({icon: '🚀', label: '一波流'});
         if (stat.maxLoss <= -1000) badges.push({icon: '💣', label: '自爆兵'});
@@ -196,7 +198,7 @@ function App() {
           ? Math.round((stat.rounds / grandTotalRounds) * 100) 
           : 0;
 
-        return { name, ...stat, badges, attendanceRate };
+        return { id: name, ...stat, badges, attendanceRate };
       })
       .sort((a, b) => b.net - a.net);
 
@@ -206,18 +208,23 @@ function App() {
   // --- 表單處理 ---
   const handlePlayerChange = (index, field, value) => {
     const newPlayers = [...players];
-    newPlayers[index][field] = value;
+    if (field === 'player') { // 一次設定 id 和 name
+      newPlayers[index].id = value.id;
+      newPlayers[index].name = value.name;
+    } else {
+      newPlayers[index][field] = value;
+    }
     setPlayers(newPlayers);
   };
 
-  const quickAddPlayer = (name) => {
-    if (players.some(p => p.name === name)) return;
+  const quickAddPlayer = (player) => {
+    if (players.some(p => p.id === player.id)) return;
     const emptyIndex = players.findIndex(p => p.name === '');
-    if (emptyIndex !== -1) handlePlayerChange(emptyIndex, 'name', name);
+    if (emptyIndex !== -1) handlePlayerChange(emptyIndex, 'player', player);
   };
 
   const handleAddNewPlayer = async () => {
-    if (newPlayerName.trim() && !availablePlayers.includes(newPlayerName)) {
+    if (newPlayerName.trim() && !availablePlayers.some(p => p.name === newPlayerName.trim())) {
       // 現在不只是更新本地狀態，而是寫入資料庫
       try {
         await addDoc(collection(db, "presets"), {
@@ -252,7 +259,11 @@ function App() {
         date: date,
         rounds: parseInt(rounds),
         createdAt: serverTimestamp(),
-        records: players.map(p => ({ name: p.name.trim(), amount: parseInt(p.amount) }))
+        records: players.map(p => ({ 
+          playerId: p.id, 
+          name: p.name.trim(), 
+          amount: parseInt(p.amount) 
+        }))
       });
       setPlayers(players.map(p => ({ ...p, amount: '' })));
       setSuccessMsg("✅ 戰績登錄成功！");
@@ -348,10 +359,10 @@ function App() {
                 </div>
               )}
               <div className="flex flex-wrap gap-1.5">
-                {availablePlayers.map(name => (
-                  <button key={name} type="button" onClick={() => quickAddPlayer(name)} disabled={players.some(p => p.name === name)}
-                    className={`px-2.5 py-1 rounded text-xs border transition ${players.some(p => p.name === name) ? 'bg-gray-200 text-gray-400 border-gray-200' : 'bg-white text-gray-700 border-gray-300 hover:border-emerald-500 hover:text-emerald-600 shadow-sm'}`}>
-                    {name}
+                {availablePlayers.map(player => (
+                  <button key={player.id} type="button" onClick={() => quickAddPlayer(player)} disabled={players.some(p => p.id === player.id)}
+                    className={`px-2.5 py-1 rounded text-xs border transition ${players.some(p => p.id === player.id) ? 'bg-gray-200 text-gray-400 border-gray-200' : 'bg-white text-gray-700 border-gray-300 hover:border-emerald-500 hover:text-emerald-600 shadow-sm'}`}>
+                    {player.name}
                   </button>
                 ))}
               </div>
@@ -360,9 +371,9 @@ function App() {
             <div className="space-y-2">
               {players.map((p, i) => (
                 <div key={i} className="flex gap-2 items-center">
-                  <input placeholder={`玩家 ${i+1}`} value={p.name} readOnly className="flex-1 p-2 border rounded bg-gray-100 text-gray-700 text-sm cursor-not-allowed" onClick={() => { if(p.name) handlePlayerChange(i, 'name', ''); }}/>
+                  <input placeholder={`玩家 ${i+1}`} value={p.name} readOnly className="flex-1 p-2 border rounded bg-gray-100 text-gray-700 text-sm cursor-not-allowed" onClick={() => { if(p.name) handlePlayerChange(i, 'player', {id: null, name: ''}); }}/>
                   <input placeholder="$" type="number" value={p.amount} onChange={e => handlePlayerChange(i, 'amount', e.target.value)} className={`w-20 p-2 border rounded text-right font-bold text-sm ${parseInt(p.amount) < 0 ? 'text-red-500' : 'text-emerald-600'}`}/>
-                  {p.name && <button type="button" onClick={() => handlePlayerChange(i, 'name', '')} className="text-gray-400 hover:text-red-500"><X size={16} /></button>}
+                  {p.name && <button type="button" onClick={() => handlePlayerChange(i, 'player', {id: null, name: ''})} className="text-gray-400 hover:text-red-500"><X size={16} /></button>}
                 </div>
               ))}
             </div>
@@ -389,7 +400,7 @@ function App() {
               </thead>
               <tbody>
                 {stats.map((s, idx) => (
-                  <tr key={s.name} onClick={() => setSelectedPlayer(s)} className="border-b last:border-0 hover:bg-emerald-50 cursor-pointer transition">
+                  <tr key={s.id} onClick={() => setSelectedPlayer(s)} className="border-b last:border-0 hover:bg-emerald-50 cursor-pointer transition">
                     <td className="py-2 pl-2 font-medium flex flex-col justify-center">
                       <div className="flex items-center gap-1">{idx===0 ? '👑' : ''} {s.name}</div>
                       <div className="flex gap-1 mt-0.5">
