@@ -188,11 +188,11 @@ function App() {
     const sortedStats = Object.entries(summary)
       .map(([name, stat]) => {
         const badges = []; // 這裡的 name 其實是 playerId
-        if (stat.net > 2000) badges.push({icon: '🏦', label: '大富豪'});
-        if (stat.maxWin >= 1000) badges.push({icon: '🚀', label: '一波流'});
-        if (stat.maxLoss <= -1000) badges.push({icon: '💣', label: '自爆兵'});
+        if (stat.net > 5000) badges.push({icon: '🏦', label: '大富豪'});
+        if (stat.maxWin >= 3000) badges.push({icon: '🚀', label: '一波流'});
+        if (stat.maxLoss <= -3000) badges.push({icon: '💣', label: '自爆兵'});
         if (stat.rounds > 20 && Math.abs(stat.net) < 200) badges.push({icon: '🐢', label: '打工仔'});
-        if (stat.net < -2000) badges.push({icon: '💸', label: '慈善家'});
+        if (stat.net < -7000) badges.push({icon: '💸', label: '慈善家'});
 
         const attendanceRate = grandTotalRounds > 0 
           ? Math.round((stat.rounds / grandTotalRounds) * 100) 
