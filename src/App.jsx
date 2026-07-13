@@ -6,8 +6,8 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 
 // 預設固定班底
 const INITIAL_PRESETS = [
-  "JK", "Mochi", "Ryan", "阿傑", 
-  "道道", "嚕卡", "柏鈞", "JS"
+  "JK", "Mochi", "Ryan", "阿傑", "Alan",
+  "道道", "嚕卡", "柏鈞", "JS", "萌萌噠"
 ];
 
 const EAST_MONEY_PER_ROUND = 100;
@@ -129,6 +129,20 @@ function App() {
     return () => unsubscribe();
   }, []);
 
+  // --- 3b. 監聽 Firebase: 固定班底 (Presets) ---
+  useEffect(() => {
+    const q = query(collection(db, "presets"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      if (snapshot.empty) {
+        setAvailablePlayers(INITIAL_PRESETS); // 如果資料庫是空的，就用預設值
+      } else {
+        const presetData = snapshot.docs.map(doc => doc.data().name);
+        setAvailablePlayers(presetData);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
   // --- 4. 合併計算總公費 ---
   useEffect(() => {
     setFinalEastMoney(gameIncomeTotal + expenseTotal);
@@ -202,11 +216,19 @@ function App() {
     if (emptyIndex !== -1) handlePlayerChange(emptyIndex, 'name', name);
   };
 
-  const handleAddNewPlayer = () => {
+  const handleAddNewPlayer = async () => {
     if (newPlayerName.trim() && !availablePlayers.includes(newPlayerName)) {
-      setAvailablePlayers([...availablePlayers, newPlayerName.trim()]);
-      setNewPlayerName("");
-      setShowAddPlayer(false);
+      // 現在不只是更新本地狀態，而是寫入資料庫
+      try {
+        await addDoc(collection(db, "presets"), {
+          name: newPlayerName.trim(),
+          createdAt: serverTimestamp()
+        });
+        setNewPlayerName("");
+        setShowAddPlayer(false);
+      } catch (err) {
+        console.error("新增固定班底失敗:", err);
+      }
     }
   };
 
