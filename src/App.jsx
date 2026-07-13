@@ -7,7 +7,7 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 // 預設固定班底
 const INITIAL_PRESETS = [
   "JK", "Mochi", "Ryan", "阿傑", "Alan",
-  "道道", "嚕卡", "柏鈞", "JS", "萌萌噠"
+  "道道", "嚕卡", "柏鈞", "魔王", "萌萌噠"
 ].map(name => ({ id: name.toLowerCase(), name })); // 改為物件陣列以供備用
 
 const EAST_MONEY_PER_ROUND = 100;
