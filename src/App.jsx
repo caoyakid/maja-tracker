@@ -136,8 +136,18 @@ function App() {
       if (snapshot.empty) {
         setAvailablePlayers(INITIAL_PRESETS); // 如果資料庫是空的，就用預設值
       } else {
-        const presetsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        setAvailablePlayers(presetsData);
+        const presetsData = snapshot.docs
+          .map(doc => ({ id: doc.id, ...doc.data() }))
+          .sort((a, b) => (a.createdAt?.toMillis?.() ?? Infinity) - (b.createdAt?.toMillis?.() ?? Infinity));
+
+        // 合併預設固定班底與資料庫中的自訂玩家，避免預設玩家被覆蓋
+        const mergedPlayers = [...INITIAL_PRESETS];
+        presetsData.forEach(preset => {
+          if (!mergedPlayers.some(p => p.id === preset.id || p.name === preset.name)) {
+            mergedPlayers.push(preset);
+          }
+        });
+        setAvailablePlayers(mergedPlayers);
       }
     });
     return () => unsubscribe();
