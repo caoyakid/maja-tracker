@@ -1,16 +1,22 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { db } from './firebase';
-import { collection, addDoc, deleteDoc, doc, onSnapshot, query, orderBy, serverTimestamp, writeBatch } from 'firebase/firestore';
-import { Trophy, History, PlusCircle, AlertCircle, Coins, X, Megaphone, UserPlus, Calculator, TrendingUp, Medal, Receipt, Trash2 } from 'lucide-react';
+import { 
+  collection, addDoc, deleteDoc, doc, setDoc, onSnapshot, query, orderBy, serverTimestamp 
+} from 'firebase/firestore';
+import { 
+  Trophy, History, PlusCircle, AlertCircle, Coins, X, Megaphone, UserPlus, 
+  Calculator, TrendingUp, Medal, Receipt, Trash2, Archive, Calendar, Sparkles, Filter, Info
+} from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
+import { calculateStats, calculateAnnualArchive, EAST_MONEY_PER_ROUND } from './utils/stats';
+import AnnualRecapModal from './components/AnnualRecapModal';
+import ArchiveListModal from './components/ArchiveListModal';
 
 // 預設固定班底
 const INITIAL_PRESETS = [
   "JK", "Mochi", "Ryan", "阿傑", "Alan",
   "道道", "嚕卡", "柏鈞", "魔王", "萌萌噠"
-].map(name => ({ id: name.toLowerCase(), name })); // 改為物件陣列以供備用
-
-const EAST_MONEY_PER_ROUND = 100;
+].map(name => ({ id: name.toLowerCase(), name }));
 
 const SLOGANS = [
   "小賭怡情，大賭郭台銘 💸",
@@ -61,25 +67,35 @@ const calculateSettlement = (records) => {
 function App() {
   // --- 資料狀態 ---
   const [logs, setLogs] = useState([]);
-  const [expenseLogs, setExpenseLogs] = useState([]); // 新增：公費收支紀錄
+  const [expenseLogs, setExpenseLogs] = useState([]);
+  const [annualArchives, setAnnualArchives] = useState([]);
   const [stats, setStats] = useState([]);
   const [loading, setLoading] = useState(true);
   
-  // 金額計算狀態
-  const [gameIncomeTotal, setGameIncomeTotal] = useState(0); // 打牌累積的
-  const [expenseTotal, setExpenseTotal] = useState(0); // 手動花掉的
-  const [finalEastMoney, setFinalEastMoney] = useState(0); // 最後顯示的總額
+  // 年度篩選狀態 (預設當前年份，如 '2026'，或 'all' 代表全歷史)
+  const currentCalendarYear = String(new Date().getFullYear());
+  const [selectedYear, setSelectedYear] = useState(currentCalendarYear);
+
+  // 金額計算狀態 (公費跨年自動滾動結轉)
+  const [allTimeGameIncome, setAllTimeGameIncome] = useState(0); // 歷年所有打牌累積收入
+  const [yearGameIncome, setYearGameIncome] = useState(0); // 當前選取年份打牌累積收入
+  const [expenseTotal, setExpenseTotal] = useState(0); // 手動花掉的 (全歷史)
+  const [finalEastMoney, setFinalEastMoney] = useState(0); // 公費水庫即時總額
 
   // UI 狀態
   const [sloganIndex, setSloganIndex] = useState(0);
   const [availablePlayers, setAvailablePlayers] = useState(INITIAL_PRESETS);
-  const [showAddPlayer, setShowAddPlayer] = useState(false); // { id: 'xxx', name: 'yyy' }
+  const [showAddPlayer, setShowAddPlayer] = useState(false);
   const [newPlayerName, setNewPlayerName] = useState("");
   
-  // Modals
+  // Modals 狀態
   const [selectedPlayer, setSelectedPlayer] = useState(null);
   const [settlementData, setSettlementData] = useState(null);
-  const [showExpenseModal, setShowExpenseModal] = useState(false); // 新增：公費管理視窗
+  const [showExpenseModal, setShowExpenseModal] = useState(false);
+  const [showArchiveListModal, setShowArchiveListModal] = useState(false);
+  const [showAnnualRecapModal, setShowAnnualRecapModal] = useState(false);
+  const [activeArchive, setActiveArchive] = useState(null);
+  const [isArchiving, setIsArchiving] = useState(false);
 
   // 表單狀態
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
@@ -109,20 +125,17 @@ function App() {
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setLogs(data);
-      calculateStats(data);
       setLoading(false);
     });
     return () => unsubscribe();
   }, []);
 
-  // --- 3. 新增監聽 Firebase: 公費收支 (Expenses) ---
+  // --- 3. 監聽 Firebase: 公費收支 (Expenses) ---
   useEffect(() => {
     const q = query(collection(db, "expenses"), orderBy("createdAt", "desc"));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setExpenseLogs(data);
-      
-      // 計算手動收支總和
       const total = data.reduce((sum, item) => sum + (parseInt(item.amount) || 0), 0);
       setExpenseTotal(total);
     });
@@ -134,13 +147,12 @@ function App() {
     const q = query(collection(db, "presets"));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       if (snapshot.empty) {
-        setAvailablePlayers(INITIAL_PRESETS); // 如果資料庫是空的，就用預設值
+        setAvailablePlayers(INITIAL_PRESETS);
       } else {
         const presetsData = snapshot.docs
           .map(doc => ({ id: doc.id, ...doc.data() }))
           .sort((a, b) => (a.createdAt?.toMillis?.() ?? Infinity) - (b.createdAt?.toMillis?.() ?? Infinity));
 
-        // 合併預設固定班底與資料庫中的自訂玩家，避免預設玩家被覆蓋
         const mergedPlayers = [...INITIAL_PRESETS];
         presetsData.forEach(preset => {
           if (!mergedPlayers.some(p => p.id === preset.id || p.name === preset.name)) {
@@ -153,72 +165,65 @@ function App() {
     return () => unsubscribe();
   }, []);
 
-  // --- 4. 合併計算總公費 ---
+  // --- 3c. 監聽 Firebase: 年度歷史檔案 (annual_archives) ---
   useEffect(() => {
-    setFinalEastMoney(gameIncomeTotal + expenseTotal);
-  }, [gameIncomeTotal, expenseTotal]);
-
-  // --- 計算邏輯 ---
-  const calculateStats = (matchData) => {
-    const summary = {};
-    let totalGameFund = 0;
-    const grandTotalRounds = matchData.reduce((sum, m) => sum + (parseInt(m.rounds) || 1), 0);
-
-    // 1. 先建立一個時間正序的陣列 (最舊 -> 最新)
-    const chronologicalMatches = [...matchData].reverse();
-
-    // 2. 改用 chronologicalMatches 跑迴圈
-    chronologicalMatches.forEach(match => {
-      const matchRounds = parseInt(match.rounds) || 1;
-      totalGameFund += matchRounds * EAST_MONEY_PER_ROUND;
-
-      match.records.forEach(record => {
-        const pId = record.playerId || record.name.trim(); // 兼容舊資料 (用名字當 id)
-        const pName = record.name.trim(); // 名字還是要用最新的
-        const amt = parseInt(record.amount) || 0;
-        
-        if (!summary[pId]) summary[pId] = { 
-          name: pName, net: 0, rounds: 0, maxWin: 0, maxLoss: 0, history: [] 
-        };
-        
-        // 累加數值
-        summary[pId].name = pName; // 隨時更新為最新的名字
-        summary[pId].net += amt;
-        summary[pId].rounds += matchRounds;
-        if (amt > summary[pId].maxWin) summary[pId].maxWin = amt;
-        if (amt < summary[pId].maxLoss) summary[pId].maxLoss = amt;
-        
-        // 3. 改用 push (因為現在時間是正序，直接往後加就是累積圖)
-        summary[pId].history.push({ date: match.date, amount: summary[pId].net });
-      });
+    const q = query(collection(db, "annual_archives"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const archivesData = snapshot.docs
+        .map(doc => ({ id: doc.id, ...doc.data() }))
+        .sort((a, b) => (b.year || 0) - (a.year || 0));
+      setAnnualArchives(archivesData);
     });
+    return () => unsubscribe();
+  }, []);
 
-    setGameIncomeTotal(totalGameFund);
+  // 取得目前資料庫中所有的年份
+  const availableYears = useMemo(() => {
+    const setYears = new Set();
+    logs.forEach(l => {
+      if (l.date) setYears.add(l.date.slice(0, 4));
+    });
+    setYears.add(currentCalendarYear);
+    return Array.from(setYears).sort().reverse();
+  }, [logs, currentCalendarYear]);
 
-    const sortedStats = Object.entries(summary)
-      .map(([name, stat]) => {
-        const badges = []; // 這裡的 name 其實是 playerId
-        if (stat.net > 5000) badges.push({icon: '🏦', label: '大富豪'});
-        if (stat.maxWin >= 3000) badges.push({icon: '🚀', label: '一波流'});
-        if (stat.maxLoss <= -3000) badges.push({icon: '💣', label: '自爆兵'});
-        if (stat.rounds > 20 && Math.abs(stat.net) < 200) badges.push({icon: '🐢', label: '打工仔'});
-        if (stat.net < -7000) badges.push({icon: '💸', label: '慈善家'});
+  // 當選取的年份在資料中不存在且非 all 時，預設使用最新年份
+  useEffect(() => {
+    if (selectedYear !== 'all' && !availableYears.includes(selectedYear) && availableYears.length > 0) {
+      setSelectedYear(availableYears[0]);
+    }
+  }, [availableYears, selectedYear]);
 
-        const attendanceRate = grandTotalRounds > 0 
-          ? Math.round((stat.rounds / grandTotalRounds) * 100) 
-          : 0;
+  // --- 4. 計算公費與當前顯示的排行榜 ---
+  useEffect(() => {
+    // 1. 全歷史打牌收入 (用於跨年滾動公費結餘)
+    const grandRounds = logs.reduce((sum, m) => sum + (parseInt(m.rounds) || 1), 0);
+    const allFund = grandRounds * EAST_MONEY_PER_ROUND;
+    setAllTimeGameIncome(allFund);
+    setFinalEastMoney(allFund + expenseTotal);
 
-        return { id: name, ...stat, badges, attendanceRate };
-      })
-      .sort((a, b) => b.net - a.net);
+    // 2. 篩選當前選取範圍的對局
+    const filteredMatches = selectedYear === 'all'
+      ? logs
+      : logs.filter(m => m.date && m.date.startsWith(`${selectedYear}-`));
 
-    setStats(sortedStats);
-  };
+    // 3. 呼叫封裝好的 calculateStats (自動套用「個人近10場」動態標籤)
+    const { stats: calculatedStats, totalGameFund } = calculateStats(filteredMatches);
+    setStats(calculatedStats);
+    setYearGameIncome(totalGameFund);
+
+  }, [logs, selectedYear, expenseTotal]);
+
+  // 當前篩選年份顯示的近期戰況
+  const displayedLogs = useMemo(() => {
+    if (selectedYear === 'all') return logs;
+    return logs.filter(m => m.date && m.date.startsWith(`${selectedYear}-`));
+  }, [logs, selectedYear]);
 
   // --- 表單處理 ---
   const handlePlayerChange = (index, field, value) => {
     const newPlayers = [...players];
-    if (field === 'player') { // 一次設定 id 和 name
+    if (field === 'player') {
       newPlayers[index].id = value.id;
       newPlayers[index].name = value.name;
     } else {
@@ -235,7 +240,6 @@ function App() {
 
   const handleAddNewPlayer = async () => {
     if (newPlayerName.trim() && !availablePlayers.some(p => p.name === newPlayerName.trim())) {
-      // 現在不只是更新本地狀態，而是寫入資料庫
       try {
         await addDoc(collection(db, "presets"), {
           name: newPlayerName.trim(),
@@ -310,14 +314,105 @@ function App() {
     }
   };
 
+  // --- 年度成績一鍵歸納 ---
+  const handleTriggerAnnualArchive = async (year) => {
+    const targetYear = String(year);
+    const targetArchive = calculateAnnualArchive(targetYear, logs, expenseLogs);
+    
+    if (targetArchive.summary.totalMatches === 0) {
+      alert(`⚠️ ${targetYear} 年度尚無任何比賽紀錄可供歸納！`);
+      return;
+    }
+
+    const existingArchive = annualArchives.find(a => String(a.year) === targetYear);
+    if (existingArchive) {
+      const confirmOverwrite = window.confirm(
+        `📌 ${targetYear} 年度已存在歷史檔案！\n確定要以最新戰績重新歸納並覆蓋更新嗎？`
+      );
+      if (!confirmOverwrite) return;
+    }
+
+    setIsArchiving(true);
+    try {
+      await setDoc(doc(db, "annual_archives", targetYear), {
+        ...targetArchive,
+        archivedAt: serverTimestamp()
+      });
+      
+      setActiveArchive(targetArchive);
+      setShowAnnualRecapModal(true);
+      setShowArchiveListModal(false);
+    } catch (err) {
+      console.error("封存年度檔案失敗:", err);
+      alert("歸納封存失敗，請檢查網路連線");
+    } finally {
+      setIsArchiving(false);
+    }
+  };
+
+  // 即時預覽指定年份的年度戰報 (尚未封存亦可查看)
+  const handlePreviewAnnualRecap = (year) => {
+    const existing = annualArchives.find(a => String(a.year) === String(year));
+    if (existing) {
+      setActiveArchive(existing);
+    } else {
+      const previewData = calculateAnnualArchive(year, logs, expenseLogs);
+      setActiveArchive(previewData);
+    }
+    setShowAnnualRecapModal(true);
+  };
+
   // --- Render ---
   return (
     <div className="min-h-screen bg-gray-100 p-4 font-sans text-gray-800 pb-20">
       <div className="max-w-md mx-auto space-y-4">
         
+        {/* --- 頂部標題 --- */}
         <h1 className="text-3xl font-bold text-emerald-700 text-center py-2 flex items-center justify-center gap-2">
           <span className="text-4xl">🀄</span> 麻將積分榜
         </h1>
+
+        {/* --- 年度切換 & 歷史檔案館入口列 --- */}
+        <div className="bg-white p-2 rounded-xl shadow-xs border border-gray-200 flex items-center justify-between text-xs">
+          <div className="flex items-center gap-1 overflow-x-auto py-0.5">
+            <span className="text-gray-400 font-bold px-1 flex items-center gap-0.5">
+              <Calendar size={13} />
+            </span>
+            {availableYears.map(year => (
+              <button
+                key={year}
+                onClick={() => setSelectedYear(year)}
+                className={`px-2.5 py-1 rounded-lg font-bold transition whitespace-nowrap ${
+                  selectedYear === year 
+                    ? 'bg-emerald-600 text-white shadow-xs' 
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                {year}年
+              </button>
+            ))}
+            <button
+              onClick={() => setSelectedYear('all')}
+              className={`px-2.5 py-1 rounded-lg font-bold transition whitespace-nowrap ${
+                selectedYear === 'all' 
+                  ? 'bg-emerald-600 text-white shadow-xs' 
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              全歷史
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1 pl-1 border-l border-gray-200">
+            <button
+              onClick={() => setShowArchiveListModal(true)}
+              className="bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold px-2.5 py-1 rounded-lg flex items-center gap-1 transition border border-amber-200 whitespace-nowrap"
+            >
+              <Archive size={13} className="text-amber-600" />
+              歷史檔 ({annualArchives.length})
+            </button>
+          </div>
+        </div>
 
         {/* --- 公費卡片 (可點擊) --- */}
         <div className="flex gap-2 h-24">
@@ -326,9 +421,12 @@ function App() {
             className="w-1/3 bg-gradient-to-br from-amber-400 to-amber-600 rounded-xl p-2 text-white shadow hover:scale-105 transition active:scale-95 flex flex-col justify-center items-center text-center relative overflow-hidden"
           >
             <div className="absolute top-1 right-1 opacity-50"><Receipt size={16}/></div>
-            <Coins size={24} className="mb-1 opacity-90" />
-            <span className="text-xs opacity-90">目前公費</span>
+            <Coins size={22} className="mb-0.5 opacity-90" />
+            <span className="text-[11px] opacity-90">目前公費結餘</span>
             <span className="text-xl font-bold">${finalEastMoney}</span>
+            {selectedYear !== 'all' && (
+              <span className="text-[9px] opacity-80 mt-0.5">{selectedYear}抽水 ${yearGameIncome}</span>
+            )}
           </button>
 
           {/* 跑馬燈 */}
@@ -340,6 +438,40 @@ function App() {
              <div className="absolute right-2 bottom-2 text-[10px] text-gray-300">每 6 秒切換</div>
           </div>
         </div>
+
+        {/* --- 當年度戰報快速一鍵歸納區塊 (若選特定年份) --- */}
+        {selectedYear !== 'all' && (
+          <div className="bg-gradient-to-r from-emerald-50 to-amber-50 p-3 rounded-xl border border-emerald-100 flex items-center justify-between text-xs">
+            <div className="flex items-center gap-1.5">
+              <Sparkles size={16} className="text-amber-500" />
+              <div>
+                <p className="font-bold text-gray-800">
+                  {selectedYear} 年度戰報
+                  <span className="ml-1 text-[10px] font-normal text-gray-500">
+                    ({displayedLogs.length} 場對局)
+                  </span>
+                </p>
+                <p className="text-[10px] text-gray-500">可一鍵歸納生成榮譽殿堂與 LINE 戰報</p>
+              </div>
+            </div>
+            <div className="flex gap-1.5">
+              <button
+                onClick={() => handlePreviewAnnualRecap(selectedYear)}
+                className="bg-white hover:bg-gray-50 text-gray-700 font-bold px-2.5 py-1.5 rounded-lg border border-gray-200 transition shadow-2xs"
+              >
+                查看戰報
+              </button>
+              <button
+                onClick={() => handleTriggerAnnualArchive(selectedYear)}
+                disabled={isArchiving}
+                className="bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold px-2.5 py-1.5 rounded-lg transition shadow-2xs flex items-center gap-1 disabled:opacity-50"
+              >
+                <Archive size={12} />
+                {isArchiving ? '歸納中...' : '一鍵歸納'}
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* --- 登錄戰績 --- */}
         <div className="bg-white p-5 rounded-xl shadow-md border-t-4 border-emerald-500">
@@ -395,9 +527,20 @@ function App() {
           </form>
         </div>
 
-        {/* --- 排行榜 --- */}
+        {/* --- 排行榜 (支援個人近10場動態標籤) --- */}
         <div className="bg-white p-4 rounded-xl shadow-md">
-          <h2 className="text-lg font-bold mb-2 flex items-center gap-2"><Trophy size={18} className="text-yellow-500"/> 排行榜 (點擊看走勢)</h2>
+          <div className="flex justify-between items-center mb-2">
+            <h2 className="text-lg font-bold flex items-center gap-2">
+              <Trophy size={18} className="text-yellow-500"/>
+              {selectedYear === 'all' ? '全歷史' : `${selectedYear} 年度`} 排行榜
+            </h2>
+            <div className="flex items-center gap-1 text-[11px] text-gray-400">
+              <span className="bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded font-bold">
+                標籤採近10場動態
+              </span>
+            </div>
+          </div>
+
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-gray-500 border-b">
@@ -413,8 +556,17 @@ function App() {
                   <tr key={s.id} onClick={() => setSelectedPlayer(s)} className="border-b last:border-0 hover:bg-emerald-50 cursor-pointer transition">
                     <td className="py-2 pl-2 font-medium flex flex-col justify-center">
                       <div className="flex items-center gap-1">{idx===0 ? '👑' : ''} {s.name}</div>
-                      <div className="flex gap-1 mt-0.5">
-                        {s.badges.map((b, i) => <span key={i} title={b.label} className="text-[10px] bg-gray-100 rounded px-1">{b.icon}</span>)}
+                      <div className="flex gap-1 mt-0.5 flex-wrap">
+                        {s.badges.map((b, i) => (
+                          <span 
+                            key={i} 
+                            title={b.desc ? `${b.label}: ${b.desc}` : b.label} 
+                            className="text-[10px] bg-gray-100 hover:bg-yellow-100 text-gray-700 rounded px-1 flex items-center gap-0.5 cursor-help"
+                          >
+                            <span>{b.icon}</span>
+                            <span className="text-[9px] font-normal">{b.label}</span>
+                          </span>
+                        ))}
                       </div>
                     </td>
                     <td className="text-center text-gray-400">{s.rounds}</td>
@@ -431,9 +583,16 @@ function App() {
 
         {/* --- 近期戰況 --- */}
         <div className="bg-white p-4 rounded-xl shadow-md">
-           <h2 className="text-lg font-bold mb-4 flex items-center gap-2"><History size={18} className="text-blue-500" /> 近期戰況</h2>
+          <div className="flex justify-between items-center mb-3">
+            <h2 className="text-lg font-bold flex items-center gap-2">
+              <History size={18} className="text-blue-500" /> 
+              {selectedYear === 'all' ? '全歷史' : `${selectedYear} 年度`} 戰況
+            </h2>
+            <span className="text-xs text-gray-400">共 {displayedLogs.length} 場</span>
+          </div>
+
           <div className="space-y-4">
-            {logs.slice(0, 10).map((log) => (
+            {displayedLogs.slice(0, 10).map((log) => (
               <div key={log.id} className="border-b last:border-0 pb-3">
                 <div className="flex justify-between items-center mb-2">
                   <span className="text-xs text-gray-400">{log.date}</span>
@@ -453,12 +612,41 @@ function App() {
                 </div>
               </div>
             ))}
-            {logs.length === 0 && <p className="text-center text-gray-400 text-sm">暫無紀錄</p>}
+            {displayedLogs.length === 0 && <p className="text-center text-gray-400 text-sm">此年份暫無比賽紀錄</p>}
           </div>
         </div>
       </div>
 
-      {/* --- Modal: 公費管理 (新增) --- */}
+      {/* --- Modal: 歷年歷史檔案館 --- */}
+      {showArchiveListModal && (
+        <ArchiveListModal
+          archives={annualArchives}
+          currentYear={currentCalendarYear}
+          onSelectArchive={(archive) => {
+            setActiveArchive(archive);
+            setShowAnnualRecapModal(true);
+          }}
+          onTriggerAnnualArchive={handleTriggerAnnualArchive}
+          onClose={() => setShowArchiveListModal(false)}
+        />
+      )}
+
+      {/* --- Modal: 年度戰報典藏 (AnnualRecapModal) --- */}
+      {showAnnualRecapModal && activeArchive && (
+        <AnnualRecapModal
+          archive={activeArchive}
+          isLivePreview={!activeArchive.archivedAt}
+          isSaving={isArchiving}
+          onSaveArchive={() => handleTriggerAnnualArchive(activeArchive.year)}
+          onReArchive={() => handleTriggerAnnualArchive(activeArchive.year)}
+          onClose={() => {
+            setShowAnnualRecapModal(false);
+            setActiveArchive(null);
+          }}
+        />
+      )}
+
+      {/* --- Modal: 公費管理 --- */}
       {showExpenseModal && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowExpenseModal(false)}>
           <div className="bg-white rounded-xl p-6 w-full max-w-sm" onClick={e => e.stopPropagation()}>
@@ -471,10 +659,10 @@ function App() {
             
             {/* 統計摘要 */}
             <div className="bg-amber-50 p-3 rounded-lg mb-4 text-center">
-              <p className="text-sm text-amber-800">打牌累積收入: <span className="font-bold">${gameIncomeTotal}</span></p>
+              <p className="text-sm text-amber-800">全歷史打牌累積: <span className="font-bold">${allTimeGameIncome}</span></p>
               <p className="text-sm text-red-600">額外支出/收入: <span className="font-bold">{expenseTotal >=0 ? '+' : ''}{expenseTotal}</span></p>
               <div className="mt-2 border-t border-amber-200 pt-2">
-                <p className="text-xs text-gray-500">目前剩餘</p>
+                <p className="text-xs text-gray-500">目前公費水庫結餘 (自動結轉)</p>
                 <p className="text-2xl font-bold text-emerald-700">${finalEastMoney}</p>
               </div>
             </div>
@@ -525,34 +713,85 @@ function App() {
         </div>
       )}
 
-      {/* --- Modal: 個人走勢圖 (保持不變) --- */}
+      {/* --- Modal: 個人走勢圖 (含近10場手風近況) --- */}
       {selectedPlayer && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setSelectedPlayer(null)}>
-          <div className="bg-white rounded-xl p-4 w-full max-w-lg" onClick={e => e.stopPropagation()}>
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="font-bold text-lg flex items-center gap-2"><TrendingUp size={20} className="text-emerald-600"/> {selectedPlayer.name} 的資金曲線</h3>
+          <div className="bg-white rounded-xl p-5 w-full max-w-lg shadow-xl" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-3">
+              <div>
+                <h3 className="font-bold text-lg flex items-center gap-2">
+                  <TrendingUp size={20} className="text-emerald-600"/> {selectedPlayer.name} 的資金曲線
+                </h3>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  累計 {selectedPlayer.rounds} 將・淨損益 {selectedPlayer.net > 0 ? '+' : ''}{selectedPlayer.net}
+                </p>
+              </div>
               <button onClick={() => setSelectedPlayer(null)} className="p-1 hover:bg-gray-100 rounded-full"><X size={20}/></button>
             </div>
-            <div className="h-64 w-full">
+
+            {/* 近 10 場動態近況看板 */}
+            {selectedPlayer.recentStats && (
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-4 text-xs">
+                <div className="flex justify-between items-center mb-1.5">
+                  <span className="font-bold text-slate-700 flex items-center gap-1">
+                    ⚡ 個人近 {selectedPlayer.recentStats.count} 場手風近況
+                  </span>
+                  <span className="text-[10px] text-gray-400">（作為標籤貼除依據）</span>
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-center mt-2">
+                  <div className="bg-white p-1.5 rounded-lg border border-slate-100">
+                    <span className="text-[10px] text-gray-400">近況淨損益</span>
+                    <p className={`font-black ${selectedPlayer.recentStats.net >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                      {selectedPlayer.recentStats.net > 0 ? '+' : ''}{selectedPlayer.recentStats.net}
+                    </p>
+                  </div>
+                  <div className="bg-white p-1.5 rounded-lg border border-slate-100">
+                    <span className="text-[10px] text-gray-400">近期單場最高</span>
+                    <p className="font-black text-purple-700">+{selectedPlayer.recentStats.maxWin}</p>
+                  </div>
+                  <div className="bg-white p-1.5 rounded-lg border border-slate-100">
+                    <span className="text-[10px] text-gray-400">近期單場最低</span>
+                    <p className="font-black text-red-500">{selectedPlayer.recentStats.maxLoss}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 折線圖 */}
+            <div className="h-56 w-full">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={[...selectedPlayer.history]}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="date" tick={{fontSize: 10}} tickFormatter={(val) => val.slice(5)} />
-                  <YAxis tick={{fontSize: 10}} width={30} />
+                  <XAxis dataKey="date" tick={{fontSize: 10}} tickFormatter={(val) => val ? val.slice(5) : ''} />
+                  <YAxis tick={{fontSize: 10}} width={32} />
                   <Tooltip />
                   <ReferenceLine y={0} stroke="#000" strokeDasharray="3 3" />
                   <Line type="monotone" dataKey="amount" stroke="#10b981" strokeWidth={3} dot={{r:3}} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
-            <div className="mt-4 flex gap-2 flex-wrap justify-center">
-              {selectedPlayer.badges.map((b,i) => <span key={i} className="px-2 py-1 bg-yellow-50 text-yellow-700 text-xs rounded border border-yellow-200 font-bold flex items-center gap-1">{b.icon} {b.label}</span>)}
+
+            {/* 標籤群 */}
+            <div className="mt-4 flex gap-2 flex-wrap justify-center border-t pt-3">
+              {selectedPlayer.badges.map((b, i) => (
+                <span 
+                  key={i} 
+                  className="px-2.5 py-1 bg-amber-50 text-amber-800 text-xs rounded-lg border border-amber-200 font-bold flex items-center gap-1 shadow-2xs"
+                >
+                  <span>{b.icon}</span> 
+                  <span>{b.label}</span>
+                  {b.desc && <span className="text-[10px] font-normal text-amber-600">({b.desc})</span>}
+                </span>
+              ))}
+              {selectedPlayer.badges.length === 0 && (
+                <span className="text-xs text-gray-400">近期無特殊稱號，平穩發育中</span>
+              )}
             </div>
           </div>
         </div>
       )}
 
-      {/* --- Modal: 結算小幫手 (保持不變) --- */}
+      {/* --- Modal: 結算小幫手 --- */}
       {settlementData && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setSettlementData(null)}>
           <div className="bg-white rounded-xl p-6 w-full max-w-sm text-center" onClick={e => e.stopPropagation()}>
